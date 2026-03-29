@@ -1,17 +1,12 @@
 /**
- * Audio capture module.
+ * Audio + Video capture module.
  *
- * Audio capture uses Web APIs (desktopCapturer, getUserMedia, MediaRecorder)
- * which only work in a renderer process. The main process orchestrates via IPC:
+ * Uses getDisplayMedia with tab capture to record ONLY the selected
+ * browser tab (Google Meet) at 1080p 30fps + that tab's audio.
+ * Mic is captured separately via getUserMedia.
  *
- * 1. Main creates/reuses a hidden capture BrowserWindow
- * 2. Main sends 'capture:start' to it with config
- * 3. The capture window runs MediaRecorder on both streams
- * 4. Audio data chunks are sent back via IPC to main for disk writes
- * 5. Main sends 'capture:stop' to finalize
- *
- * This module provides the capture window HTML/JS as inline code
- * loaded via a data: URL to avoid extra build targets.
+ * The user picks the Meet tab via the browser's native tab picker.
+ * This ensures we capture ONLY Meet's audio — not Spotify, notifications, etc.
  */
 
 import { BrowserWindow, ipcMain } from 'electron'
@@ -20,7 +15,7 @@ import { createWriteStream, WriteStream } from 'fs'
 import log from '../utils/logger'
 
 let captureWindow: BrowserWindow | null = null
-let systemStream: WriteStream | null = null
+let tabStream: WriteStream | null = null
 let micStream: WriteStream | null = null
 
 export function createCaptureWindow(): BrowserWindow {
@@ -39,7 +34,6 @@ export function createCaptureWindow(): BrowserWindow {
     }
   })
 
-  // Load the capture page
   captureWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(getCaptureHTML())}`)
 
   captureWindow.on('closed', () => {
@@ -51,21 +45,23 @@ export function createCaptureWindow(): BrowserWindow {
 
 export function startCapture(
   outputDir: string,
+  recordScreen: boolean,
   micDeviceId?: string
 ): void {
   const win = createCaptureWindow()
 
-  systemStream = createWriteStream(join(outputDir, 'audio_system.webm'))
+  // Tab capture = video (1080p) + tab audio in one file
+  const videoExt = recordScreen ? 'webm' : 'webm'
+  tabStream = createWriteStream(join(outputDir, `tab_capture.${videoExt}`))
   micStream = createWriteStream(join(outputDir, 'audio_mic.webm'))
 
-  // Listen for audio data chunks from the capture window
-  ipcMain.removeAllListeners('capture:system-data')
+  ipcMain.removeAllListeners('capture:tab-data')
   ipcMain.removeAllListeners('capture:mic-data')
   ipcMain.removeAllListeners('capture:error')
   ipcMain.removeAllListeners('capture:levels')
 
-  ipcMain.on('capture:system-data', (_event, buffer: Buffer) => {
-    systemStream?.write(buffer)
+  ipcMain.on('capture:tab-data', (_event, buffer: Buffer) => {
+    tabStream?.write(buffer)
   })
 
   ipcMain.on('capture:mic-data', (_event, buffer: Buffer) => {
@@ -76,22 +72,31 @@ export function startCapture(
     log.error('Capture error:', error)
   })
 
-  win.webContents.send('capture:start', { micDeviceId: micDeviceId || 'default' })
+  win.webContents.send('capture:start', {
+    micDeviceId: micDeviceId || 'default',
+    recordScreen
+  })
 }
 
 export function stopCapture(): Promise<void> {
   return new Promise((resolve) => {
     if (captureWindow && !captureWindow.isDestroyed()) {
+      let resolved = false
       ipcMain.once('capture:stopped', () => {
-        closeStreams()
-        resolve()
+        if (!resolved) {
+          resolved = true
+          closeStreams()
+          resolve()
+        }
       })
       captureWindow.webContents.send('capture:stop')
 
-      // Timeout safety
       setTimeout(() => {
-        closeStreams()
-        resolve()
+        if (!resolved) {
+          resolved = true
+          closeStreams()
+          resolve()
+        }
       }, 3000)
     } else {
       closeStreams()
@@ -120,9 +125,9 @@ export function destroyCaptureWindow(): void {
 }
 
 function closeStreams(): void {
-  if (systemStream) {
-    systemStream.end()
-    systemStream = null
+  if (tabStream) {
+    tabStream.end()
+    tabStream = null
   }
   if (micStream) {
     micStream.end()
@@ -136,23 +141,15 @@ function getCaptureHTML(): string {
 <head><title>MeetRec Capture</title></head>
 <body>
 <script>
-const { ipcRenderer } = require('electron');
-
-let systemRecorder = null;
+let tabRecorder = null;
 let micRecorder = null;
-let systemMediaStream = null;
+let tabMediaStream = null;
 let micMediaStream = null;
 let audioContext = null;
-let systemAnalyser = null;
+let tabAnalyser = null;
 let micAnalyser = null;
 let levelsInterval = null;
 
-// Listen for capture commands from main process
-window.addEventListener('message', (event) => {
-  // Not used with preload bridge
-});
-
-// Use IPC from preload
 if (window.api) {
   window.api.onCaptureStart(async (config) => {
     try {
@@ -162,77 +159,117 @@ if (window.api) {
     }
   });
 
-  window.api.onCaptureStop(() => {
-    stopCapture();
-  });
+  window.api.onCaptureStop(() => stopCapture());
 
   window.api.onCapturePause(() => {
-    if (systemRecorder?.state === 'recording') systemRecorder.pause();
+    if (tabRecorder?.state === 'recording') tabRecorder.pause();
     if (micRecorder?.state === 'recording') micRecorder.pause();
   });
 
   window.api.onCaptureResume(() => {
-    if (systemRecorder?.state === 'paused') systemRecorder.resume();
+    if (tabRecorder?.state === 'paused') tabRecorder.resume();
     if (micRecorder?.state === 'paused') micRecorder.resume();
   });
 }
 
 async function startCapture(config) {
-  // Get system audio via desktopCapturer
-  // In Electron, we use getDisplayMedia for system audio
-  systemMediaStream = await navigator.mediaDevices.getDisplayMedia({
-    audio: true,
-    video: { width: 1, height: 1 } // minimal video (required to get audio)
-  });
+  // ── Tab capture: video (1080p 30fps) + ONLY that tab's audio ──
+  // getDisplayMedia with preferCurrentTab asks user to pick a Chrome tab.
+  // When "Share tab audio" is checked, we get ONLY that tab's audio stream.
+  // This is the key: no system audio, no Spotify, just Meet.
+  const displayConstraints = {
+    video: config.recordScreen ? {
+      width: { ideal: 1920 },
+      height: { ideal: 1080 },
+      frameRate: { ideal: 30, max: 30 },
+      displaySurface: 'browser'     // Prefer tab capture
+    } : {
+      width: { ideal: 1 },
+      height: { ideal: 1 },
+      displaySurface: 'browser'
+    },
+    audio: {
+      // Tab audio capture — captures ONLY the selected tab's audio
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false,
+      sampleRate: 48000
+    },
+    // Hint to prefer tab selection over full screen
+    preferCurrentTab: false,
+    selfBrowserSurface: 'exclude',
+    surfaceSwitching: 'exclude',
+    systemAudio: 'exclude'          // Exclude system audio, only tab audio
+  };
 
-  // Remove video track, we only want audio
-  systemMediaStream.getVideoTracks().forEach(t => t.stop());
+  tabMediaStream = await navigator.mediaDevices.getDisplayMedia(displayConstraints);
 
-  // Get microphone audio
-  const micConstraints = { audio: config.micDeviceId && config.micDeviceId !== 'default'
-    ? { deviceId: { exact: config.micDeviceId } }
-    : true
+  // If user chose NOT to record video, remove video track
+  if (!config.recordScreen) {
+    tabMediaStream.getVideoTracks().forEach(t => t.stop());
+  }
+
+  // ── Mic capture (separate track) ──
+  const micConstraints = {
+    audio: config.micDeviceId && config.micDeviceId !== 'default'
+      ? { deviceId: { exact: config.micDeviceId }, echoCancellation: true, noiseSuppression: true }
+      : { echoCancellation: true, noiseSuppression: true }
   };
   micMediaStream = await navigator.mediaDevices.getUserMedia(micConstraints);
 
-  // Set up audio analysis for levels
+  // ── Audio analysis for level meters ──
   audioContext = new AudioContext();
 
-  const systemSource = audioContext.createMediaStreamSource(systemMediaStream);
-  systemAnalyser = audioContext.createAnalyser();
-  systemAnalyser.fftSize = 256;
-  systemSource.connect(systemAnalyser);
+  // Tab audio levels
+  const tabAudioTracks = tabMediaStream.getAudioTracks();
+  if (tabAudioTracks.length > 0) {
+    const tabAudioStream = new MediaStream(tabAudioTracks);
+    const tabSource = audioContext.createMediaStreamSource(tabAudioStream);
+    tabAnalyser = audioContext.createAnalyser();
+    tabAnalyser.fftSize = 256;
+    tabSource.connect(tabAnalyser);
+  }
 
+  // Mic audio levels
   const micSource = audioContext.createMediaStreamSource(micMediaStream);
   micAnalyser = audioContext.createAnalyser();
   micAnalyser.fftSize = 256;
   micSource.connect(micAnalyser);
 
-  // Send audio levels at ~15fps
+  // Send levels at ~15fps
   levelsInterval = setInterval(() => {
-    const systemLevel = getAudioLevel(systemAnalyser);
+    const tabLevel = tabAnalyser ? getAudioLevel(tabAnalyser) : 0;
     const micLevel = getAudioLevel(micAnalyser);
     if (window.api) {
-      window.api.sendLevels({ system: systemLevel, mic: micLevel });
+      window.api.sendLevels({ system: tabLevel, mic: micLevel });
     }
   }, 66);
 
-  // Start recording system audio
-  systemRecorder = new MediaRecorder(systemMediaStream, {
-    mimeType: 'audio/webm;codecs=opus'
+  // ── Record tab stream (video + tab audio) ──
+  // Use high-quality codec for crystal clear 1080p
+  const tabMimeType = config.recordScreen
+    ? 'video/webm;codecs=vp9,opus'    // VP9 for sharp 1080p video + Opus audio
+    : 'audio/webm;codecs=opus';        // Audio-only if no screen recording
+
+  tabRecorder = new MediaRecorder(tabMediaStream, {
+    mimeType: tabMimeType,
+    videoBitsPerSecond: config.recordScreen ? 6000000 : undefined,  // 6 Mbps for crisp 1080p
+    audioBitsPerSecond: 256000     // 256 kbps audio for crystal clear quality
   });
-  systemRecorder.ondataavailable = (e) => {
+
+  tabRecorder.ondataavailable = (e) => {
     if (e.data.size > 0 && window.api) {
       e.data.arrayBuffer().then(buf => {
-        window.api.sendSystemData(new Uint8Array(buf));
+        window.api.sendTabData(new Uint8Array(buf));
       });
     }
   };
-  systemRecorder.start(1000); // 1 second chunks
+  tabRecorder.start(1000);
 
-  // Start recording mic
+  // ── Record mic (separate track for transcription) ──
   micRecorder = new MediaRecorder(micMediaStream, {
-    mimeType: 'audio/webm;codecs=opus'
+    mimeType: 'audio/webm;codecs=opus',
+    audioBitsPerSecond: 256000
   });
   micRecorder.ondataavailable = (e) => {
     if (e.data.size > 0 && window.api) {
@@ -250,38 +287,35 @@ function stopCapture() {
     levelsInterval = null;
   }
 
-  if (systemRecorder && systemRecorder.state !== 'inactive') {
-    systemRecorder.stop();
+  const promises = [];
+
+  if (tabRecorder && tabRecorder.state !== 'inactive') {
+    promises.push(new Promise(resolve => {
+      tabRecorder.onstop = resolve;
+      tabRecorder.stop();
+    }));
   }
   if (micRecorder && micRecorder.state !== 'inactive') {
-    micRecorder.stop();
+    promises.push(new Promise(resolve => {
+      micRecorder.onstop = resolve;
+      micRecorder.stop();
+    }));
   }
 
-  if (systemMediaStream) {
-    systemMediaStream.getTracks().forEach(t => t.stop());
-  }
-  if (micMediaStream) {
-    micMediaStream.getTracks().forEach(t => t.stop());
-  }
-
-  if (audioContext) {
-    audioContext.close();
-    audioContext = null;
-  }
-
-  if (window.api) {
-    window.api.sendCaptureStopped();
-  }
+  Promise.all(promises).then(() => {
+    if (tabMediaStream) tabMediaStream.getTracks().forEach(t => t.stop());
+    if (micMediaStream) micMediaStream.getTracks().forEach(t => t.stop());
+    if (audioContext) { audioContext.close(); audioContext = null; }
+    if (window.api) window.api.sendCaptureStopped();
+  });
 }
 
 function getAudioLevel(analyser) {
   const data = new Uint8Array(analyser.frequencyBinCount);
   analyser.getByteFrequencyData(data);
   let sum = 0;
-  for (let i = 0; i < data.length; i++) {
-    sum += data[i];
-  }
-  return sum / data.length / 255; // Normalize 0-1
+  for (let i = 0; i < data.length; i++) sum += data[i];
+  return sum / data.length / 255;
 }
 </script>
 </body>

@@ -205,8 +205,8 @@ export function registerIpcHandlers(): void {
         body: `Transcript ready for "${rec.title}"`
       }).show()
 
-      // Auto-summarize if enabled
-      if (config.ai.autoSummarize && config.ai.claudeApiKey) {
+      // Auto-summarize if enabled (uses Claude Code CLI, no API key needed)
+      if (config.ai.autoSummarize) {
         autoSummarize(recordingId, transcript, config)
       }
 
@@ -225,8 +225,6 @@ export function registerIpcHandlers(): void {
     if (!rec) throw new Error('Recording not found')
 
     const config = getConfig()
-    if (!config.ai.claudeApiKey) throw new Error('Claude API key not configured')
-
     const transcriptPath = join(rec.file_path, 'transcript.json')
     if (!existsSync(transcriptPath)) throw new Error('No transcript found')
 
@@ -407,7 +405,8 @@ async function autoSummarize(recordingId: string, transcript: Transcript, config
   try {
     updateRecording(recordingId, { summary_status: 'processing' })
 
-    const summary = await generateSummary(transcript, config.ai.claudeApiKey)
+    // Uses Claude Code CLI — no API key needed
+    const summary = await generateSummary(transcript)
 
     const rec = getRecording(recordingId)
     if (!rec) return

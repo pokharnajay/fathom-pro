@@ -1,20 +1,20 @@
-import { BrowserWindow } from 'electron'
 import { join } from 'path'
-import { existsSync } from 'fs'
+import { existsSync, copyFileSync } from 'fs'
 import { format } from 'date-fns'
 import { EventEmitter } from 'events'
 import { startCapture, stopCapture, pauseCapture, resumeCapture, destroyCaptureWindow } from './audio-capture'
-import { mixTracks, convertToWavForTranscription, getAudioDuration } from './encoder'
+import { mixTabAndMicAudio, extractTabAudio, convertToMp4, mixMicIntoVideo, convertToWavForTranscription, getAudioDuration } from './encoder'
 import { createRecordingDir } from '../storage/file-manager'
 import { insertRecording, updateRecording } from '../db/recordings-repo'
 import { getConfig } from '../storage/config'
 import log from '../utils/logger'
-import type { RecordingState, RecordingConfig, AudioLevels } from '../utils/constants'
+import type { RecordingState, RecordingConfig } from '../utils/constants'
 
 class RecordingEngine extends EventEmitter {
   private _state: RecordingState = 'idle'
   private recordingId: string | null = null
   private recordingDir: string | null = null
+  private recordingConfig: RecordingConfig | null = null
   private startTime: number = 0
   private pausedDuration: number = 0
   private pauseStart: number = 0
@@ -47,11 +47,11 @@ class RecordingEngine extends EventEmitter {
     const now = new Date()
     this.recordingId = `rec_${format(now, 'yyyyMMdd_HHmmss')}`
     this.recordingDir = createRecordingDir(now)
+    this.recordingConfig = config
     this.startTime = Date.now()
     this.pausedDuration = 0
     this.pauseStart = 0
 
-    // Insert DB record
     insertRecording({
       id: this.recordingId,
       title: `Meeting ${format(now, 'MMM d, yyyy h:mm a')}`,
@@ -64,10 +64,9 @@ class RecordingEngine extends EventEmitter {
       created_at: now.toISOString()
     })
 
-    // Start audio capture
-    startCapture(this.recordingDir, config.micDeviceId)
+    // Start capture — tab video/audio + mic
+    startCapture(this.recordingDir, config.recordScreen, config.micDeviceId)
 
-    // Start timer that emits elapsed time
     this.timerInterval = setInterval(() => {
       if (this._state === 'recording') {
         this.emit('timer', this.elapsedSeconds)
@@ -110,7 +109,6 @@ class RecordingEngine extends EventEmitter {
     const duration = this.elapsedSeconds
     this.setState('stopped')
 
-    // Stop audio capture
     await stopCapture()
     destroyCaptureWindow()
 
@@ -118,53 +116,60 @@ class RecordingEngine extends EventEmitter {
 
     const dir = this.recordingDir!
     const id = this.recordingId!
+    const config = this.recordingConfig!
 
-    // Process audio files
     try {
-      const systemWebm = join(dir, 'audio_system.webm')
+      const tabCapture = join(dir, 'tab_capture.webm')
       const micWebm = join(dir, 'audio_mic.webm')
-      const systemWav = join(dir, 'audio_system.wav')
+      const tabAudioWav = join(dir, 'audio_system.wav')
       const micWav = join(dir, 'audio_mic.wav')
       const mixedWav = join(dir, 'audio_mixed.wav')
 
-      // Convert webm to wav for each track
-      if (existsSync(systemWebm)) {
-        await convertToWavForTranscription(systemWebm, systemWav)
+      // 1. Extract tab audio to WAV (for transcription)
+      if (existsSync(tabCapture)) {
+        await extractTabAudio(tabCapture, tabAudioWav)
       }
+
+      // 2. Convert mic to WAV
       if (existsSync(micWebm)) {
         await convertToWavForTranscription(micWebm, micWav)
       }
 
-      // Mix tracks
-      if (existsSync(systemWav) && existsSync(micWav)) {
-        await mixTracks(systemWav, micWav, mixedWav)
-      } else if (existsSync(systemWav)) {
-        // Copy system as mixed if no mic
-        const { copyFileSync } = require('fs')
-        copyFileSync(systemWav, mixedWav)
+      // 3. Mix tab audio + mic into combined WAV (for playback & transcription)
+      if (existsSync(tabAudioWav) && existsSync(micWav)) {
+        await mixTabAndMicAudio(tabCapture, micWebm, mixedWav)
+      } else if (existsSync(tabAudioWav)) {
+        copyFileSync(tabAudioWav, mixedWav)
       } else if (existsSync(micWav)) {
-        const { copyFileSync } = require('fs')
         copyFileSync(micWav, mixedWav)
       }
 
-      // Get actual duration from audio
+      // 4. If screen recording, produce a crystal-clear 1080p MP4
+      if (config.recordScreen && existsSync(tabCapture)) {
+        const mp4Path = join(dir, 'screen.mp4')
+        await convertToMp4(tabCapture, mp4Path, config.quality)
+
+        // Also create a version with mic audio mixed in
+        if (existsSync(micWebm)) {
+          const mp4Mixed = join(dir, 'screen_with_mic.mp4')
+          await mixMicIntoVideo(mp4Path, micWebm, mp4Mixed)
+        }
+      }
+
+      // Get actual duration
       let actualDuration = duration
       if (existsSync(mixedWav)) {
         try {
           actualDuration = Math.round(await getAudioDuration(mixedWav))
-        } catch {
-          // fallback to timer duration
-        }
+        } catch { /* use timer */ }
       }
 
-      // Update DB record
       updateRecording(id, { duration_seconds: actualDuration })
-
       this.setState('done')
 
-      // Auto-transcribe if enabled
-      const config = getConfig()
-      if (config.transcription.autoTranscribe) {
+      // Auto-transcribe
+      const appConfig = getConfig()
+      if (appConfig.transcription.autoTranscribe) {
         this.emit('auto-transcribe', id)
       }
 
@@ -179,6 +184,7 @@ class RecordingEngine extends EventEmitter {
   reset(): void {
     this.recordingId = null
     this.recordingDir = null
+    this.recordingConfig = null
     this.startTime = 0
     this.pausedDuration = 0
     this.pauseStart = 0

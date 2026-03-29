@@ -9,18 +9,20 @@ export default function OverlayView() {
   const pauseRecording = useRecordingStore((s) => s.pauseRecording)
   const resumeRecording = useRecordingStore((s) => s.resumeRecording)
 
-  const formatTime = (s: number) => {
+  const fmt = (s: number) => {
     const m = Math.floor(s / 60)
     const sec = s % 60
     return `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
   }
 
+  const isPaused = state === 'paused'
+
   return (
     <motion.div
-      initial={{ y: -60, opacity: 0 }}
-      animate={{ y: 0, opacity: 1 }}
-      exit={{ y: -60, opacity: 0 }}
-      transition={{ type: 'spring', stiffness: 400, damping: 30 }}
+      initial={{ y: -70, opacity: 0, scale: 0.9 }}
+      animate={{ y: 0, opacity: 1, scale: 1 }}
+      exit={{ y: -70, opacity: 0, scale: 0.9 }}
+      transition={{ type: 'spring', stiffness: 350, damping: 28 }}
       style={{
         width: '100%',
         height: '100%',
@@ -30,119 +32,124 @@ export default function OverlayView() {
       }}
     >
       <div
-        className="titlebar-drag"
+        className="drag"
         style={{
           display: 'flex',
           alignItems: 'center',
-          gap: 10,
-          padding: '8px 16px',
-          background: 'rgba(30, 30, 30, 0.92)',
-          backdropFilter: 'blur(20px)',
-          borderRadius: 32,
+          gap: 12,
+          padding: '10px 16px',
+          background: 'rgba(20, 20, 20, 0.94)',
+          backdropFilter: 'blur(30px) saturate(180%)',
+          WebkitBackdropFilter: 'blur(30px) saturate(180%)',
+          borderRadius: 'var(--radius-pill)',
           color: '#fff',
-          boxShadow: '0 4px 20px rgba(0,0,0,0.3), 0 0 0 1px rgba(255,255,255,0.1) inset',
+          boxShadow: 'var(--shadow-pill)',
           fontSize: 13,
           fontWeight: 500
         }}
       >
-        {/* Recording indicator */}
+        {/* Recording dot */}
         <motion.div
-          animate={{ opacity: state === 'paused' ? [1, 0.3] : [1, 0.4, 1] }}
-          transition={{ duration: state === 'paused' ? 0.8 : 1.5, repeat: Infinity }}
+          animate={{ opacity: isPaused ? [1, 0.2] : [1, 0.35, 1] }}
+          transition={{ duration: isPaused ? 0.6 : 1.2, repeat: Infinity, ease: 'easeInOut' }}
           style={{
-            width: 10,
-            height: 10,
+            width: 8,
+            height: 8,
             borderRadius: '50%',
-            background: state === 'paused' ? '#ff9500' : '#ff3b30',
-            flexShrink: 0
+            background: isPaused ? '#ff9500' : '#ff3b30',
+            boxShadow: isPaused ? '0 0 6px rgba(255,149,0,0.5)' : '0 0 8px rgba(255,59,48,0.5)'
           }}
         />
 
         {/* Timer */}
-        <span style={{ fontFamily: 'var(--font-mono)', minWidth: 46, textAlign: 'center' }}>
-          {formatTime(elapsed)}
+        <span style={{
+          fontFamily: 'var(--font-mono)',
+          fontSize: 14,
+          fontWeight: 600,
+          minWidth: 48,
+          textAlign: 'center',
+          letterSpacing: '0.02em'
+        }}>
+          {fmt(elapsed)}
         </span>
 
-        {/* Audio levels */}
-        <div
-          className="titlebar-no-drag"
-          style={{ display: 'flex', gap: 3, alignItems: 'center' }}
-        >
-          <LevelBar level={levels.system} color="#34c759" label="S" />
-          <LevelBar level={levels.mic} color="#007aff" label="M" />
+        {/* Audio level bars */}
+        <div className="no-drag" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          <LevelIndicator level={levels.system} color="#30d158" label="T" />
+          <LevelIndicator level={levels.mic} color="#5ac8fa" label="M" />
         </div>
 
         {/* Separator */}
-        <div style={{ width: 1, height: 20, background: 'rgba(255,255,255,0.15)' }} />
+        <div style={{ width: 1, height: 22, background: 'rgba(255,255,255,0.12)', borderRadius: 1 }} />
 
         {/* Controls */}
-        <div className="titlebar-no-drag" style={{ display: 'flex', gap: 6 }}>
+        <div className="no-drag" style={{ display: 'flex', gap: 4 }}>
           {state === 'recording' ? (
-            <IconButton onClick={pauseRecording} title="Pause">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-                <rect x="6" y="4" width="4" height="16" rx="1" />
-                <rect x="14" y="4" width="4" height="16" rx="1" />
+            <OvlButton onClick={pauseRecording} title="Pause">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+                <rect x="6" y="4" width="4" height="16" rx="1.5" />
+                <rect x="14" y="4" width="4" height="16" rx="1.5" />
               </svg>
-            </IconButton>
-          ) : state === 'paused' ? (
-            <IconButton onClick={resumeRecording} title="Resume">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+            </OvlButton>
+          ) : (
+            <OvlButton onClick={resumeRecording} title="Resume">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
                 <path d="M8 5v14l11-7z" />
               </svg>
-            </IconButton>
-          ) : null}
-
-          <IconButton onClick={stopRecording} title="Stop" danger>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-              <rect x="6" y="6" width="12" height="12" rx="2" />
+            </OvlButton>
+          )}
+          <OvlButton onClick={stopRecording} title="Stop" danger>
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor">
+              <rect x="5" y="5" width="14" height="14" rx="2" />
             </svg>
-          </IconButton>
+          </OvlButton>
         </div>
       </div>
     </motion.div>
   )
 }
 
-function LevelBar({ level, color, label }: { level: number; color: string; label: string }) {
+function LevelIndicator({ level, color, label }: { level: number; color: string; label: string }) {
+  const barCount = 4
+  const normalizedLevel = Math.min(level, 1)
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
-      <div
-        style={{
-          width: 4,
-          height: 18,
-          borderRadius: 2,
-          background: 'rgba(255,255,255,0.15)',
-          overflow: 'hidden',
-          display: 'flex',
-          flexDirection: 'column-reverse'
-        }}
-      >
-        <motion.div
-          animate={{ height: `${Math.min(level * 100, 100)}%` }}
-          transition={{ duration: 0.1 }}
-          style={{ width: '100%', background: color, borderRadius: 2 }}
-        />
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3 }}>
+      <div style={{ display: 'flex', gap: 1.5, alignItems: 'flex-end', height: 16 }}>
+        {Array.from({ length: barCount }).map((_, i) => {
+          const threshold = (i + 1) / barCount
+          const isLit = normalizedLevel >= threshold * 0.7
+          return (
+            <motion.div
+              key={i}
+              animate={{ opacity: isLit ? 1 : 0.2 }}
+              transition={{ duration: 0.08 }}
+              style={{
+                width: 3,
+                height: 4 + i * 3,
+                borderRadius: 1.5,
+                background: isLit ? color : 'rgba(255,255,255,0.2)'
+              }}
+            />
+          )
+        })}
       </div>
-      <span style={{ fontSize: 8, color: 'rgba(255,255,255,0.5)' }}>{label}</span>
+      <span style={{ fontSize: 7, color: 'rgba(255,255,255,0.35)', fontWeight: 600, letterSpacing: '0.05em' }}>
+        {label}
+      </span>
     </div>
   )
 }
 
-function IconButton({
-  children,
-  onClick,
-  title,
-  danger
-}: {
-  children: React.ReactNode
-  onClick: () => void
-  title: string
-  danger?: boolean
+function OvlButton({ children, onClick, title, danger }: {
+  children: React.ReactNode; onClick: () => void; title: string; danger?: boolean
 }) {
   return (
-    <button
+    <motion.button
       onClick={onClick}
       title={title}
+      whileHover={{ scale: 1.1 }}
+      whileTap={{ scale: 0.9 }}
       style={{
         width: 28,
         height: 28,
@@ -150,14 +157,13 @@ function IconButton({
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        background: danger ? 'rgba(255, 59, 48, 0.3)' : 'rgba(255,255,255,0.1)',
-        color: danger ? '#ff6961' : '#fff',
+        background: danger ? 'rgba(255, 59, 48, 0.25)' : 'rgba(255,255,255,0.1)',
+        color: danger ? '#ff6961' : 'rgba(255,255,255,0.9)',
         border: 'none',
-        cursor: 'pointer',
-        transition: 'background 0.15s'
+        cursor: 'pointer'
       }}
     >
       {children}
-    </button>
+    </motion.button>
   )
 }

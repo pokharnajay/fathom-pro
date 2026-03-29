@@ -11,14 +11,18 @@ export interface EncodeOptions {
   outputPath: string
 }
 
-export function mixTracks(
-  systemAudioPath: string,
+/**
+ * Extract audio from tab capture (which may contain video+audio)
+ * and mix with mic audio into a single WAV for transcription.
+ */
+export function mixTabAndMicAudio(
+  tabCapturePath: string,
   micAudioPath: string,
   outputPath: string
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     ffmpeg()
-      .input(systemAudioPath)
+      .input(tabCapturePath)
       .input(micAudioPath)
       .complexFilter([
         '[0:a][1:a]amix=inputs=2:duration=longest:dropout_transition=2[out]'
@@ -40,31 +44,122 @@ export function mixTracks(
   })
 }
 
-export function encodeAudio(options: EncodeOptions): Promise<void> {
+/**
+ * Extract just the tab audio track from a tab capture webm
+ * (strips video, keeps audio only as WAV).
+ */
+export function extractTabAudio(
+  tabCapturePath: string,
+  outputPath: string
+): Promise<void> {
   return new Promise((resolve, reject) => {
-    const cmd = ffmpeg().input(options.inputPath)
-
-    switch (options.quality) {
-      case 'lossless':
-        cmd.audioCodec('pcm_s16le').audioFrequency(16000).audioChannels(1)
-        break
-      case 'high':
-        cmd.audioCodec('aac').audioBitrate('256k').audioFrequency(44100).audioChannels(2)
-        break
-      case 'standard':
-      default:
-        cmd.audioCodec('aac').audioBitrate('128k').audioFrequency(44100).audioChannels(2)
-        break
-    }
-
-    cmd
-      .output(options.outputPath)
+    ffmpeg()
+      .input(tabCapturePath)
+      .noVideo()
+      .audioCodec('pcm_s16le')
+      .audioFrequency(16000)
+      .audioChannels(1)
+      .output(outputPath)
       .on('end', () => {
-        log.info('Encode complete:', options.outputPath)
+        log.info('Tab audio extracted:', outputPath)
         resolve()
       })
       .on('error', (err) => {
-        log.error('Encode failed:', err)
+        log.error('Tab audio extraction failed:', err)
+        reject(err)
+      })
+      .run()
+  })
+}
+
+/**
+ * Convert tab capture webm to a high-quality 1080p MP4 (H.264 + AAC).
+ * This produces a crystal-clear, universally-playable recording.
+ */
+export function convertToMp4(
+  inputPath: string,
+  outputPath: string,
+  quality: QualityPreset = 'high'
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const cmd = ffmpeg().input(inputPath)
+
+    if (quality === 'lossless') {
+      // Very high quality H.264 for near-lossless
+      cmd
+        .videoCodec('libx264')
+        .outputOptions(['-crf', '14', '-preset', 'slow'])
+        .size('1920x1080')
+        .fps(30)
+        .audioCodec('aac')
+        .audioBitrate('320k')
+        .audioFrequency(48000)
+    } else if (quality === 'high') {
+      // Crystal clear 1080p 30fps
+      cmd
+        .videoCodec('libx264')
+        .outputOptions(['-crf', '18', '-preset', 'medium'])
+        .size('1920x1080')
+        .fps(30)
+        .audioCodec('aac')
+        .audioBitrate('256k')
+        .audioFrequency(48000)
+    } else {
+      // Standard — still good, smaller files
+      cmd
+        .videoCodec('libx264')
+        .outputOptions(['-crf', '23', '-preset', 'fast'])
+        .size('1280x720')
+        .fps(30)
+        .audioCodec('aac')
+        .audioBitrate('192k')
+        .audioFrequency(44100)
+    }
+
+    cmd
+      .output(outputPath)
+      .on('end', () => {
+        log.info('MP4 conversion complete:', outputPath)
+        resolve()
+      })
+      .on('error', (err) => {
+        log.error('MP4 conversion failed:', err)
+        reject(err)
+      })
+      .run()
+  })
+}
+
+/**
+ * Mix mic audio into an existing MP4's audio track,
+ * producing a final MP4 with both meeting audio + your voice.
+ */
+export function mixMicIntoVideo(
+  videoPath: string,
+  micPath: string,
+  outputPath: string
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    ffmpeg()
+      .input(videoPath)
+      .input(micPath)
+      .complexFilter([
+        '[0:a][1:a]amix=inputs=2:duration=longest:dropout_transition=2[aout]'
+      ])
+      .outputOptions([
+        '-map', '0:v',
+        '-map', '[aout]',
+        '-c:v', 'copy'   // Copy video stream, only re-encode audio
+      ])
+      .audioCodec('aac')
+      .audioBitrate('256k')
+      .output(outputPath)
+      .on('end', () => {
+        log.info('Mic mixed into video:', outputPath)
+        resolve()
+      })
+      .on('error', (err) => {
+        log.error('Mic mix failed:', err)
         reject(err)
       })
       .run()
@@ -75,6 +170,7 @@ export function convertToWavForTranscription(inputPath: string, outputPath: stri
   return new Promise((resolve, reject) => {
     ffmpeg()
       .input(inputPath)
+      .noVideo()
       .audioCodec('pcm_s16le')
       .audioFrequency(16000)
       .audioChannels(1)
