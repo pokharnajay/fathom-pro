@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
-import Button from '../shared/Button'
+import { useEffect, useRef, useState, useMemo } from 'react'
+import { motion } from 'framer-motion'
 
 interface AudioPlayerProps {
   filePath: string
@@ -9,13 +9,24 @@ interface AudioPlayerProps {
 
 export default function AudioPlayer({ filePath, onTimeUpdate, seekTo }: AudioPlayerProps) {
   const audioRef = useRef<HTMLAudioElement>(null)
-  const waveformRef = useRef<HTMLDivElement>(null)
   const [isPlaying, setIsPlaying] = useState(false)
   const [currentTime, setCurrentTime] = useState(0)
   const [duration, setDuration] = useState(0)
   const [track, setTrack] = useState<'mixed' | 'system' | 'mic'>('mixed')
 
   const audioSrc = `file://${filePath}/audio_${track}.wav`
+
+  // Generate a consistent waveform pattern per file
+  const bars = useMemo(() => {
+    const b: number[] = []
+    let seed = filePath.length
+    for (let i = 0; i < 100; i++) {
+      seed = (seed * 16807 + 7) % 2147483647
+      const h = 0.15 + (seed / 2147483647) * 0.85
+      b.push(h)
+    }
+    return b
+  }, [filePath])
 
   useEffect(() => {
     const audio = audioRef.current
@@ -31,7 +42,6 @@ export default function AudioPlayer({ filePath, onTimeUpdate, seekTo }: AudioPla
     audio.addEventListener('timeupdate', onTime)
     audio.addEventListener('loadedmetadata', onDur)
     audio.addEventListener('ended', onEnd)
-
     return () => {
       audio.removeEventListener('timeupdate', onTime)
       audio.removeEventListener('loadedmetadata', onDur)
@@ -39,7 +49,6 @@ export default function AudioPlayer({ filePath, onTimeUpdate, seekTo }: AudioPla
     }
   }, [audioSrc])
 
-  // Handle external seek
   useEffect(() => {
     if (seekTo !== undefined && audioRef.current && Math.abs(audioRef.current.currentTime - seekTo) > 1) {
       audioRef.current.currentTime = seekTo
@@ -48,114 +57,76 @@ export default function AudioPlayer({ filePath, onTimeUpdate, seekTo }: AudioPla
 
   const togglePlay = () => {
     if (!audioRef.current) return
-    if (isPlaying) {
-      audioRef.current.pause()
-    } else {
-      audioRef.current.play()
-    }
+    if (isPlaying) audioRef.current.pause()
+    else audioRef.current.play()
     setIsPlaying(!isPlaying)
   }
 
   const handleSeek = (e: React.MouseEvent<HTMLDivElement>) => {
     if (!audioRef.current || !duration) return
     const rect = e.currentTarget.getBoundingClientRect()
-    const pct = (e.clientX - rect.left) / rect.width
-    audioRef.current.currentTime = pct * duration
+    audioRef.current.currentTime = ((e.clientX - rect.left) / rect.width) * duration
   }
 
-  const formatTime = (s: number) => {
-    if (isNaN(s)) return '00:00'
+  const fmtTime = (s: number) => {
+    if (isNaN(s)) return '0:00'
     const m = Math.floor(s / 60)
     const sec = Math.floor(s % 60)
-    return `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
+    return `${m}:${String(sec).padStart(2, '0')}`
   }
 
-  const progress = duration > 0 ? (currentTime / duration) * 100 : 0
+  const progress = duration > 0 ? currentTime / duration : 0
 
   return (
-    <div
-      style={{
-        background: 'var(--bg-secondary)',
-        borderRadius: 'var(--radius-md)',
-        padding: 20,
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 16
-      }}
-    >
+    <div style={{
+      background: 'var(--bg-player)',
+      borderRadius: 'var(--radius-lg)',
+      padding: '20px 24px',
+      border: '1px solid var(--border)',
+      boxShadow: 'var(--shadow-xs)'
+    }}>
       <audio ref={audioRef} src={audioSrc} preload="metadata" />
 
-      {/* Waveform / progress bar */}
+      {/* Waveform */}
       <div
-        ref={waveformRef}
         onClick={handleSeek}
         style={{
-          height: 48,
+          height: 56,
           borderRadius: 'var(--radius-sm)',
-          background: 'var(--bg-tertiary)',
           cursor: 'pointer',
-          position: 'relative',
-          overflow: 'hidden'
+          display: 'flex',
+          alignItems: 'center',
+          gap: 1.5,
+          padding: '0 2px',
+          marginBottom: 16
         }}
       >
-        {/* Progress fill */}
-        <div
-          style={{
-            position: 'absolute',
-            left: 0,
-            top: 0,
-            bottom: 0,
-            width: `${progress}%`,
-            background: 'rgba(0, 122, 255, 0.2)',
-            transition: 'width 0.1s linear'
-          }}
-        />
-
-        {/* Playhead */}
-        <div
-          style={{
-            position: 'absolute',
-            left: `${progress}%`,
-            top: 0,
-            bottom: 0,
-            width: 2,
-            background: 'var(--accent)',
-            transition: 'left 0.1s linear'
-          }}
-        />
-
-        {/* Fake waveform bars */}
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            height: '100%',
-            padding: '0 4px',
-            gap: 1
-          }}
-        >
-          {Array.from({ length: 80 }).map((_, i) => {
-            const h = 8 + Math.sin(i * 0.7) * 10 + Math.random() * 12
-            return (
-              <div
-                key={i}
-                style={{
-                  flex: 1,
-                  height: h,
-                  background: i / 80 * 100 < progress ? 'var(--accent)' : 'var(--text-tertiary)',
-                  borderRadius: 1,
-                  opacity: 0.6
-                }}
-              />
-            )
-          })}
-        </div>
+        {bars.map((h, i) => {
+          const barProgress = i / bars.length
+          const isPast = barProgress < progress
+          return (
+            <div
+              key={i}
+              style={{
+                flex: 1,
+                height: `${h * 100}%`,
+                borderRadius: 2,
+                background: isPast ? 'var(--accent)' : 'var(--text-tertiary)',
+                opacity: isPast ? 0.9 : 0.18,
+                transition: 'opacity 0.08s ease, background 0.08s ease'
+              }}
+            />
+          )
+        })}
       </div>
 
-      {/* Controls */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-        <button
+      {/* Controls row */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+        {/* Play button */}
+        <motion.button
           onClick={togglePlay}
+          whileHover={{ scale: 1.06 }}
+          whileTap={{ scale: 0.95 }}
           style={{
             width: 40,
             height: 40,
@@ -165,9 +136,9 @@ export default function AudioPlayer({ filePath, onTimeUpdate, seekTo }: AudioPla
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            fontSize: 16,
             border: 'none',
-            cursor: 'pointer'
+            cursor: 'pointer',
+            boxShadow: '0 2px 8px rgba(0, 122, 255, 0.25)'
           }}
         >
           {isPlaying ? (
@@ -180,30 +151,49 @@ export default function AudioPlayer({ filePath, onTimeUpdate, seekTo }: AudioPla
               <path d="M8 5v14l11-7z" />
             </svg>
           )}
-        </button>
+        </motion.button>
 
-        <span style={{ fontSize: 13, fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>
-          {formatTime(currentTime)} / {formatTime(duration)}
+        {/* Time */}
+        <span style={{
+          fontSize: 13,
+          fontFamily: 'var(--font-mono)',
+          color: 'var(--text-secondary)',
+          fontWeight: 500,
+          minWidth: 90
+        }}>
+          {fmtTime(currentTime)}
+          <span style={{ opacity: 0.4, margin: '0 3px' }}>/</span>
+          {fmtTime(duration)}
         </span>
 
         <div style={{ flex: 1 }} />
 
         {/* Track selector */}
-        <div style={{ display: 'flex', gap: 4 }}>
+        <div style={{
+          display: 'flex',
+          gap: 1,
+          background: 'var(--bg-tertiary)',
+          borderRadius: 'var(--radius-sm)',
+          padding: 2
+        }}>
           {(['mixed', 'system', 'mic'] as const).map((t) => (
             <button
               key={t}
               onClick={() => setTrack(t)}
               style={{
-                padding: '3px 8px',
+                padding: '4px 10px',
                 fontSize: 11,
-                borderRadius: 4,
-                background: track === t ? 'var(--accent)' : 'var(--bg-tertiary)',
-                color: track === t ? '#fff' : 'var(--text-secondary)',
-                textTransform: 'capitalize'
+                fontWeight: 500,
+                borderRadius: 6,
+                background: track === t ? 'var(--bg-card)' : 'transparent',
+                color: track === t ? 'var(--text-primary)' : 'var(--text-tertiary)',
+                boxShadow: track === t ? 'var(--shadow-xs)' : 'none',
+                textTransform: 'capitalize',
+                cursor: 'pointer',
+                border: 'none'
               }}
             >
-              {t}
+              {t === 'system' ? 'Tab' : t}
             </button>
           ))}
         </div>

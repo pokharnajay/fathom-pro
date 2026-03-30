@@ -115,8 +115,11 @@ const api = {
   onCaptureResume: (cb: () => void) => {
     ipcRenderer.on('capture:resume', () => cb())
   },
+  sendTabData: (data: Uint8Array) => {
+    ipcRenderer.send('capture:tab-data', Buffer.from(data))
+  },
   sendSystemData: (data: Uint8Array) => {
-    ipcRenderer.send('capture:system-data', Buffer.from(data))
+    ipcRenderer.send('capture:tab-data', Buffer.from(data))
   },
   sendMicData: (data: Uint8Array) => {
     ipcRenderer.send('capture:mic-data', Buffer.from(data))
